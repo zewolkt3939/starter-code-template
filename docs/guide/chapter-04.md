@@ -1070,6 +1070,308 @@ def route_search(state: ResearchState) -> str:
 
 ---
 
+```mermaid
+flowchart LR
+    IN[User query] --> GR[Guardrail input check]
+    GR --> RS[reason: chon hanh dong]
+    RS --> RT{tool call?}
+    RT -->|tool thuong| ACT[act: chay tool an toan]
+    RT -->|tool rui ro| HUMAN["HITL interrupt: cho nguoi duyet"]
+    RT -->|du du kien| FIN[finalize: cau tra loi]
+    HUMAN -->|dong y| ACT
+    HUMAN -->|tu choi| RS
+    ACT --> AS[assess: du du kien chua?]
+    AS -->|chua + con vong| RS
+    AS -->|het vong| ESC[finalize_with_partial: escape hatch]
+    FIN --> OUT[Output + citations]
+    ESC --> OUT
+```
+
+## 4.8A Harness Engineering — Khung quanh agent
+
+### Harness là gì?
+
+Nếu LLM là bộ não thì **harness** (khung kết cấu) là toàn bộ phần còn lại của cơ thể: scaffolding (vòng lặp agent), tools, guardrails, giới hạn chi phí, và feedback loop. Một công thức dùng nhiều trong ngành năm 2026:
+
+> **Agent giỏi là agent có harness giỏi.**
+
+Điều này giải thích vì sao các nền tảng lớn — Claude Agent SDK, OpenAI Agents SDK, LangGraph — đều converge về cùng một kiến trúc: chúng không bán "model thông minh hơn", chúng cung cấp **harness có sẵn**: vòng lặp tool-call có kiểm soát, giới hạn bước, context quản lý, permission gate. Stanford CS329Z (Engineering AI Agents, Fall 2026) thậm chí đặt homework đầu tiên là "Build an Agentic Harness" — trước cả bài tập về model.
+
+Một harness tối thiểu gồm 4 thành phần:
+
+1. **Scaffolding:** vòng lặp agent — tools — observation (mà bạn đã xây ở §4.6)
+2. **Tools:** tập công cụ được khai báo schema rõ ràng (§4.5, §4.8B)
+3. **Guardrails:** kiểm tra input/output, giới hạn quyền, chống prompt injection
+4. **Feedback loop:** cách agent nhận biết kết quả tốt/xấu và tự sửa (review node ở §4.7 là một dạng)
+
+### Chống pattern drift
+
+Pattern drift là hiện tượng agent **sao chép pattern xấu trong chính codebase của bạn** — nếu prompt mẫu hoặc tool cũ trong repo viết thiếu error handling, agent (và cả đồng đội dùng AI assistant) sẽ sinh code mới theo đúng pattern xấu đó, và lỗi lan truyền qua từng commit. Chống pattern drift bằng cách tập trung harness vào **một chỗ duy nhất**: system prompt, khai báo tools, guardrails, và giới hạn đều được định nghĩa ở một module, mọi agent trong dự án dùng chung.
+
+```python
+from dataclasses import dataclass, field
+from langchain_core.tools import BaseTool
+
+@dataclass
+class AgentHarness:
+    """Harness = mọi thứ quanh LLM, khai báo tập trung một chỗ."""
+    system_prompt: str
+    tools: list[BaseTool] = field(default_factory=list)
+    guardrails: list = field(default_factory=list)   # hàm check_input / check_output
+    max_steps: int = 10          # chống loop vô hạn (chi tiết §4.8C)
+    budget_usd: float = 0.10     # trần chi phí mỗi phiên
+
+# Toàn bộ agent trong dự án dùng chung harness này —
+# sửa một chỗ, mọi nơi được cập nhật, không drift.
+HARNESS = AgentHarness(
+    system_prompt="Bạn là trợ lý nghiên cứu. Chỉ dùng tool được cấp...",
+    tools=[web_search, calculate],
+    guardrails=[block_prompt_injection, mask_pii],
+)
+```
+
+### Log agent (ch02) và harness sản phẩm (phần này) — khác nhau thế nào?
+
+Chương 2 đã dạy bạn cài **hooks Claude Code để LOG** usage AI của đội: capture prompt, tool call, gửi về grading server khi git push. Đó là harness **cho quy trình làm việc** (workflow) — quan sát con người dùng AI như thế nào. Phần này là harness **cho sản phẩm**: khung chạy quanh agent mà người dùng cuối tương tác. Hai thứ bổ sung nhau: hooks ch02 cho bạn dữ liệu quy trình để báo cáo; harness sản phẩm quyết định agent của đội chạy an toàn và ổn định thế nào. Đội có cả hai là đội hiểu agent ở cả hai tầng.
+
+> 💡 **MẸO:** Khi đọc code các agent SDK (Claude Agent SDK, OpenAI Agents SDK), hãy đếm xem bao nhiêu phần trăm code là "vòng lặp LLM" và bao nhiêu là phần còn lại — permission, retry, giới hạn, format context. Con số thứ hai thường chiếm đa số, và đó chính là harness.
+
+---
+
+## 4.8B MCP — Model Context Protocol
+
+### Chuẩn công nghiệp cho tool access
+
+Tới năm 2026, **MCP (Model Context Protocol)** — được Anthropic công bố cuối 2024 và chuyển sang Linux Foundation — đã trở thành chuẩn công nghiệp để agent truy cập tools: một protocol mở chuẩn hóa cách khai báo tool, cách agent gọi tool, và cách server cung cấp tool. Thay vì mỗi dự án tự viết lớp kết nối riêng tới mỗi API, bạn viết **một MCP server** và mọi client hiểu MCP (Claude Code, Cursor, LangChain, ChatGPT, v.v.) dùng được ngay.
+
+Vì sao điều này quan trọng với đội của bạn:
+
+1. **Viết một lần, dùng mọi nơi:** tool search viết thành MCP server chạy được trong Claude Code khi dev, và trong app LangGraph khi deploy
+2. **Tách biệt quyền:** MCP server chạy tiến trình riêng — có thể giới hạn quyền, log, sandbox độc lập với agent
+3. **Ngôn ngữ trung tính:** server viết bằng Python, client bằng TypeScript, giao tiếp qua JSON-RPC
+
+### MCP server đơn giản với FastMCP
+
+```python
+# server_search.py — MCP server cung cấp tool tìm kiếm
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("web-search")
+
+@mcp.tool()
+def web_search(query: str, max_results: int = 5) -> str:
+    """Tìm kiếm thông tin trên web cho câu truy vấn.
+
+    Args:
+        query: Câu truy vấn tìm kiếm, cụ thể và rõ ràng
+        max_results: Số kết quả tối đa (1-10, mặc định 5)
+    """
+    # Giữ nguyên logic web_search bạn đã viết ở §4.5
+    return f"[Kết quả cho '{query}']: ..."
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")  # chạy local qua stdin/stdout
+```
+
+Và phía agent LangGraph, kết nối tới MCP server bằng `langchain-mcp-adapters`:
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+
+async def main():
+    async with MultiServerMCPClient(
+        {
+            "web-search": {
+                "command": "python",
+                "args": ["server_search.py"],
+                "transport": "stdio",
+            }
+        }
+    ) as client:
+        tools = client.get_tools()  # MCP tools trở thành LangChain tools
+        agent = create_react_agent(llm, tools)
+        result = await agent.ainvoke(
+            {"messages": [("user", "GDP Việt Nam 2024 là bao nhiêu?")]}
+        )
+```
+
+### Khi nào dùng MCP, khi nào viết tool thường?
+
+| Tình huống | Nên chọn |
+|---|---|
+| Tool nội bộ, chỉ agent của đội dùng, logic đơn giản | Tool thường (`@tool`) — ít lớp trừu tượng hơn |
+| Cần dùng cùng tool trong nhiều môi trường (dev CLI + app deploy) | MCP server |
+| Tool cần quyền truy cập nhạy cảm (DB nội bộ, API trả phí) — muốn tách quyền, log riêng | MCP server |
+| Dùng service có sẵn MCP server (GitHub, filesystem, browser, Slack...) | Luôn MCP — không tự viết lại |
+
+Case cohort 2 minh họa hướng đi này: đội **Aclaris aiKnowledge Hub** xây pipeline biên soạn tri thức bằng 2 agent dùng **MCP tools** cho các thao tác đọc/ghi tri thức, tách phần thực thi khỏi phần suy luận — nhờ đó pipeline MAP → REDUCE → REFINE → VERIFY → COMMIT (xem §4.8E) chạy ổn định qua nhiều tool call dài hạn.
+
+**Bài tập 4.8A-B.** Chuyển tool `web_search` ở §4.5 của bạn thành một MCP server (file `server_search.py`), rồi viết script client kết nối và gọi tool qua MCP. **Output nộp:** (1) file server, (2) screenshot hoặc log một lượt gọi tool thành công qua MCP client, (3) một đoạn 5 dòng giải thích đội bạn sẽ dùng MCP cho tool nào trong dự án và tại sao.
+
+---
+
+## 4.8C Loop Engineering — Thiết kế điều kiện dừng
+
+### Vòng lặp nào cũng cần lối ra
+
+ReAct ở §4.6 tạo ra vòng lặp `agent → tools → agent`. Vòng lặp là sức mạnh của agent — nhưng vòng lặp **không có điều kiện dừng tốt** là cách nhanh nhất để đốt hết ngân sách API. Loop engineering là kỹ năng thiết kế **stopping criteria** một cách tường minh, thay vì hy vọng LLM "tự biết lúc nào đủ".
+
+Bốn lớp điều kiện dừng, từ thô tới tinh:
+
+1. **Max-iterations:** giới hạn cứng số vòng lặp — lớp bắt buộc, không bao giờ bỏ
+2. **Budget tokens/chi phí:** dừng khi tổng chi phí phiên vượt ngưỡng (ví dụ 0.10 USD)
+3. **Self-assessment node:** một node cho agent **tự hỏi** "đủ dữ kiện trả lời chưa?" trước mỗi vòng
+4. **Escape hatch:** mọi trạng thái đều phải có đường tới END — kể cả khi mọi thứ lỗi
+
+### Self-assessment node
+
+```python
+async def assess_node(state: ResearchState) -> dict:
+    """Agent tự hỏi: đã đủ dữ kiện trả lời chưa?"""
+    prompt = f"""Bạn đang trả lời câu hỏi: {state['query']}
+Đã thu thập: {len(state.get('search_results', []))} kết quả tìm kiếm.
+Đủ dữ kiện để trả lời đầy đủ chưa?
+Trả về JSON: {{"enough": true/false, "missing": "thiếu gì nếu chưa đủ"}}"""
+    response = await llm.ainvoke([HumanMessage(content=prompt)])
+    import json
+    try:
+        return {"enough_info": json.loads(response.content).get("enough", False)}
+    except json.JSONDecodeError:
+        return {"enough_info": False}  # parse lỗi → coi như chưa đủ, vòng sau chốt
+```
+
+### Escape hatch — học từ đội CareerPulse (011)
+
+Đội **CareerPulse (cohort 1)** làm đúng bài toán này trong agent phỏng vấn: node interviewer **tự kiểm tra số câu hỏi đã hỏi**, khi `question_count >= max` thì chuyển sang pha `Closing` — luôn luôn có đường tới END, kể cả khi LLM vẫn "muốn hỏi thêm". Kèm theo `retry_policy` tối đa 3 lần và SqliteSaver checkpoint để phục hồi phiên. Logic routing chỉ cần vài dòng:
+
+```python
+MAX_QUESTIONS = 5
+BUDGET_USD = 0.10
+
+def route_interview(state: dict) -> str:
+    """Escape hatch: mọi nhánh đều có đường tới END."""
+    if state.get("question_count", 0) >= MAX_QUESTIONS:
+        return "closing"                      # hết lượt hỏi
+    if state.get("cost_usd", 0.0) >= BUDGET_USD:
+        return "closing"                      # hết ngân sách
+    if state.get("enough_info"):
+        return "closing"                      # agent tự đánh giá đã đủ
+    return "ask"                              # chưa đủ → hỏi tiếp
+```
+
+Nguyên tắc thiết kế: **điều kiện dừng nằm trong code (deterministic), không nằm trong prompt**. Prompt có thể nói "hãy ngừng khi đủ thông tin" — nhưng chỉ dòng code `question_count >= MAX_QUESTIONS` mới bảo đảm dừng. Tư duy này cũng là trọng tâm câu hỏi loop-breaking assessment của case Gamma: agent sản phẩm phải chốt được câu trả lời trong trần lượt, chứ không "tự do" vô hạn.
+
+> ⚠️ **LƯU Ý:** Vòng lặp ReAct mặc định của `create_react_agent` đã có `recursion_limit` (mặc định 25 bước) — graph vượt giới hạn sẽ raise `GraphRecursionError`. Đây là lưới an toàn cuối cùng, không phải điều kiện dừng chính của bạn. Thiết kế điều kiện dừng như một phần của sản phẩm, đừng delegate việc đó cho exception.
+
+---
+
+## 4.8D Graph Orchestration — Khi nào cần graph thật?
+
+### Graph không phải là mặc định
+
+Chương này dạy LangGraph từ đầu vì graph là mô hình tư duy đúng cho agent có trạng thái. Nhưng một quan sát quan trọng từ chính các đội AI20K: **nhiều team outgrow LangGraph** — bắt đầu với graph 10 node, rồi nhận ra luồng thực tế chỉ đi 2-3 đường cố định. Đội **NexusEdu (007)** — đội có điểm code cao nhất cohort 1 — ghi thẳng trong README rằng họ đã "refactored from complex graph models for maximum reliability": rời khỏi graph phức tạp sang deterministic chains, và sản phẩm ổn định hơn. **Rời graph khi không cần là quyết định kiến trúc đúng, không phải thất bại.**
+
+Mọi layer orchestration thêm vào đều có giá: debug khó hơn, onboarding đồng đội chậm hơn, lỗi state khó tái hiện hơn. Dùng đúng tầng vừa đủ:
+
+| Tình huống | Nền tảng nên dùng | Ví dụ |
+|---|---|---|
+| Luồng cố định A → B → C, không nhánh | **Chain đơn** (gọi LLM tuần tự) | Dịch, tóm tắt, extract |
+| Có phân loại đầu vào, mỗi loại một luồng xử lý | **Router + chain** (conditional edge đầu graph) | Phân loại câu hỏi → RAG hoặc web search (§4.8) |
+| Cần vòng lặp, quay lại bước trước theo điều kiện runtime | **Graph** (LangGraph) | Planning agent §4.7, ReAct §4.6 |
+| Nhiều vai trò chuyên biệt, cần phân công và tổng hợp kết quả | **Multi-agent / supervisor-worker** | DevCoach 002: 6 agents một supervisor |
+
+### Nếu dùng graph: ba tính năng đáng giá
+
+**1. Conditional edge THẬT** — routing function phải thật sự thay đổi luồng, không phải no-op trả về cùng một node mọi trường hợp (một lỗi template cũ từng mắc: khai báo conditional edge nhưng map cả hai nhánh về cùng node — graph "có điều kiện" trên giấy, tuyến tính trong thực tế). Mọi nhánh trong map phải dẫn tới node khác nhau:
+
+```python
+graph.add_conditional_edges(
+    "review",
+    should_continue_research,
+    {
+        "research": "research",   # lặp lại — đường về trước
+        "finalize": "finalize",   # chốt — hai đường THẬT khác nhau
+    },
+)
+```
+
+**2. Subgraph** — gói một graph con thành một node của graph cha, để phân tách mối quan tâm (ví dụ: subgraph "nghiên cứu" làm việc với `search_results`, graph cha chỉ thấy `draft`):
+
+```python
+research_subgraph = research_builder.compile()   # graph §4.7 như một module
+graph.add_node("research", research_subgraph)    # dùng như node thường
+```
+
+**3. Checkpointer** — lưu state sau mỗi bước để debug time-travel và phục hồi phiên (đội 011 dùng SqliteSaver cho persistence phiên phỏng vấn):
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+app = graph.compile(checkpointer=InMemorySaver())
+result = await app.ainvoke(
+    {"query": "..."},
+    config={"configurable": {"thread_id": "demo-day-001"}},
+)
+```
+
+**Bài tập 4.8C-D.** Viết một trang ADR (Architecture Decision Record, xem chương 3) cho dự án đội bạn, trả lời: dự án cần chain, router, graph, hay multi-agent? Trích 2 yêu cầu chức năng làm bằng chứng. Nếu chọn graph: vẽ graph (node + edge thật, không no-op) và chỉ rõ điều kiện dừng từng vòng lặp theo 4 lớp ở §4.8C. **Output nộp:** file `docs/ADR-orchestration.md` + diagram.
+
+---
+
+## 4.8E Multi-LLM — Cascade Routing và Judge khác Generator
+
+### Không phải task nào cũng cần model đắt
+
+Dùng một model duy nhất cho mọi request là lãng phí: phần lớn câu hỏi người dùng (FAQ, tra cứu đơn giản) không cần model flagship. **Cascade routing cheap-first** chạy model rẻ trước, chỉ escalate lên model mạnh khi cần:
+
+```python
+CHEAP = "gpt-4o-mini"
+STRONG = "gpt-4o"
+CONFIDENCE_THRESHOLD = 0.7
+
+async def cascade_answer(query: str, state: dict) -> dict:
+    """Model rẻ trả lời trước; confidence thấp thì escalate model mạnh."""
+    cheap = await llm_with_confidence(CHEAP).ainvoke(query)
+    if cheap.confidence >= CONFIDENCE_THRESHOLD:
+        return {"answer": cheap.text, "model_used": CHEAP}
+    strong = await llm_with_confidence(STRONG).ainvoke(query)
+    return {"answer": strong.text, "model_used": STRONG}
+```
+
+Luồng cascade:
+
+```mermaid
+flowchart TD
+    Q["Câu hỏi người dùng"] --> R{"Router: câu đơn giản hay phức tạp?"}
+    R -->|"Câu đơn giản"| Cheap["Model rẻ: gpt-4o-mini"]
+    R -->|"Câu phức tạp"| Strong["Model mạnh: gpt-4o"]
+    Cheap --> C{"Confidence >= 0.7?"}
+    C -->|"Đạt"| J
+    C -->|"Không đạt - escalate"| Strong
+    Strong --> J["Judge: model thứ ba chấm điểm"]
+    J -->|"Đạt"| Out["Trả lời người dùng"]
+    J -->|"Không đạt - sinh lại"| Strong
+```
+
+Theo các số liệu công bố về cascade routing (OpenAI, Microsoft AI agent design patterns), cách phân tầng này thường giúp **giảm đáng kể chi phí** — con số ~60% được ghi nhận ở các hệ thống có tỷ lệ lớn câu hỏi đơn giản — vì phần lớn request không bao giờ chạm tới model đắt. Đội bạn nên đo tỷ lệ escalate thực tế của chính mình thay vì lấy số của người khác.
+
+### Judge khác Generator — người chấm phải khác người viết
+
+Khi cần đánh giá chất lượng câu trả lời tự động (LLM-as-judge), quy tắc số một: **model chấm phải khác model sinh**. Model tự chấm bài của chính mình có bias thiên vị kết quả mình tạo ra — điểm tự chấm thường cao hơn điểm chấm bởi model khác. Dùng model thứ ba làm judge, hoặc tối thiểu một phiên bản/pipeline khác.
+
+Liên hệ các case đã học:
+
+- **Aclaris aiKnowledge Hub (cohort 2):** kiến trúc **2-agent** — agent biên soạn chạy pipeline MAP → REDUCE → REFINE → VERIFY → COMMIT, agent verifier **độc lập** dò mâu thuẫn nội dung trước khi COMMIT vào wiki. Chính cấu trúc generator ≠ verifier này giúp đạt Hit Rate 0.91 và Groundedness 0.96 trong eval.
+- **NurA Nurse Assistant (cohort 2):** mở rộng thành nhiều lớp kiểm tra nối tiếp — phủ định keyword → LLM intent classifier → grounding guard → output guard. Mỗi lớp bắt loại lỗi lớp trước có thể bỏ sót.
+- **VibeMaster (009, cohort 1):** tự định nghĩa **citation-accuracy metric** — đo đích số trích dẫn có thật trong nguồn — thay vì chỉ hỏi LLM "câu trả lời tốt không". Metric cụ thể, đếm được, luôn thắng đánh giá chung chung.
+
+Chi tiết methodology LLM-as-judge (rubric, pairwise so pointwise, chống judge bias) thuộc chương 10 — Evaluation. Ở đây bạn chỉ cần nhớ nguyên tắc kiến trúc: **tách người viết khỏi người chấm, ở cả tầng model lẫn tầng node.**
+
+**Bài tập 4.8E.** Ghi log 50 câu hỏi thật (từ demo hoặc bạn bè chơi thử sản phẩm) với cascade router ở trên: mỗi câu ghi model nào xử lý và confidence. **Output nộp:** bảng kết quả 50 dòng + tỷ lệ câu xử lý bởi model rẻ + ước lượng tiết kiệm chi phí (% request không chạm model mạnh nhân chênh lệch giá) + một đoạn nhận xét: ngưỡng confidence 0.7 của đội bạn là quá cao, quá thấp, hay hợp lý?
+
+---
+
 ## 4.9 Error Handling — Ba tầng bảo vệ
 
 Agent chạy nhiều bước, gọi nhiều API, xử lý nhiều loại dữ liệu — nên lỗi là điều không thể tránh khỏi. Một agent production cần ba tầng error handling: node level, graph level, và tool level.
@@ -1122,6 +1424,8 @@ LangGraph hỗ trợ retry policy tự động ở level node. Bạn truyền `r
 
 ```python
 from langgraph.types import RetryPolicy
+
+# Lưu ý: RetryPolicy có thể nằm ở module khác tùy phiên bản LangGraph — kiểm tra documentation chính thức
 
 # Định nghĩa retry policy
 retry_policy = RetryPolicy(
@@ -1377,6 +1681,16 @@ def test_should_continue_research():
 
 10. **Graph hoàn chỉnh** kết hợp tất cả: state design + nodes + edges + tools + error handling. Bắt đầu đơn giản, iterate dần.
 
+11. **Harness** là khung quanh agent: scaffolding + tools + guardrails + feedback loop + giới hạn, khai báo tập trung một chỗ để chống pattern drift. Agent giỏi là agent có harness giỏi — phân biệt với hooks logging ở chương 2 (quan sát quy trình) khác harness sản phẩm (khung chạy agent).
+
+12. **MCP** là chuẩn công nghiệp cho tool access: viết tool một lần dưới dạng MCP server, mọi client hiểu MCP dùng được. Chọn MCP khi cần tái sử dụng đa môi trường, tách quyền, hoặc dùng server có sẵn.
+
+13. **Loop engineering**: mọi vòng lặp cần điều kiện dừng tường minh — max-iterations, budget chi phí, self-assessment node, escape hatch. Điều kiện dừng nằm trong code (deterministic), không nằm trong prompt.
+
+14. **Graph orchestration**: graph không phải mặc định — bảng quyết định chain / router / graph / multi-agent; rời graph khi không cần là quyết định đúng. Nếu dùng graph: conditional edge thật, subgraph, checkpointer.
+
+15. **Multi-LLM**: cascade routing cheap-first (model rẻ trước, escalate theo confidence) giảm chi phí; judge phải khác model generator vì model tự chấm bài mình có bias.
+
 ---
 
 ## Câu hỏi ôn tập
@@ -1390,3 +1704,13 @@ def test_should_continue_research():
 4. Viết một routing function quyết định node tiếp theo dựa trên nội dung câu hỏi. Ví dụ: câu hỏi về thời tiết → weather node, câu hỏi về toán → calculate node, khác → answer node.
 
 5. Bạn đang xây dựng agent trả lời câu hỏi về tài liệu nội bộ công ty. Bạn sẽ chọn RAG hay web search? Tại sao? Mô tả flow từ câu hỏi đến câu trả lời.
+
+6. Phân biệt harness và agent: nếu bỏ hết harness (guardrails, giới hạn, feedback loop), phần còn lại của agent là gì? Vì sao pattern drift nguy hiểm hơn khi dự án có nhiều thành viên dùng AI assistant?
+
+7. Đội bạn có một tool tra cứu điểm số sinh viên cần dùng trong cả Claude Code (khi dev) và app LangGraph (khi deploy). Nên viết tool thường hay MCP server? Giải thích lợi ích và một rủi ro cần guard.
+
+8. Thiết kế điều kiện dừng cho agent tư vấn tuyển sinh: agent được phép hỏi tối đa 5 câu làm rõ, mỗi phiên chi không quá 0.05 USD. Viết routing function (dưới 10 dòng) đảm bảo mọi nhánh đều có đường tới END.
+
+9. Dự án của bạn có luồng cố định: nhận CV → trích thông tin → chấm điểm → trả kết quả, không nhánh nào. Có nên dùng LangGraph không? Trình bày lập luận theo bảng quyết định ở §4.8D và nêu một tình huống trong tương lai có thể khiến bạn đổi quyết định.
+
+10. Vì sao model chấm điểm (judge) phải khác model sinh câu trả lời? Nếu buộc phải dùng cùng một model cho cả hai vai trò, bạn có thể giảm bias bằng cách nào?

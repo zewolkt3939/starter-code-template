@@ -3,6 +3,15 @@ title: "Lời mở đầu"
 weight: 1
 ---
 
+```mermaid
+flowchart LR
+    W1[Tuan 1 - G1: idea + USP] --> W2[Tuan 2 - G2: architecture + repo chay]
+    W2 --> W3[Tuan 3 - G3: agent + tools + guardrail]
+    W3 --> W4[Tuan 4 - G4: deploy + eval vong 1]
+    W4 --> W5[Tuan 5 - G5: before/after + tong duyet BGK]
+    W5 --> W6[Tuan 6 - G6: Demo Day + 10 deliverables]
+```
+
 ## Mục tiêu của tài liệu này
 
 Cuốn sách này được thiết kế với một mục tiêu duy nhất: **giúp bạn xây dựng một dự án AI Agent đạt chất lượng cao**, từ thiết kế kiến trúc đến nộp bài cuối kỳ.
@@ -63,7 +72,7 @@ Nếu bạn chưa vững Python, hãy hoàn thành khóa "AI Python for Beginner
 
 | Tuần | Nội dung | Chương | Thời gian |
 |------|----------|--------|-----------|
-| 1 | Clone repo của đội, setup môi trường, git workflow | 1-2 | 4h |
+| 1 | Clone template, setup môi trường, git workflow | 1-2 | 4h |
 | 2 | Thiết kế kiến trúc, vẽ diagram | 3 | 6h |
 | 3 | Xây dựng AI Agent với LangGraph | 4 | 8h |
 | 4 | Phát triển API + Giao diện | 5-6 | 8h |

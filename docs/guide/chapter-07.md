@@ -1,761 +1,356 @@
 ---
-title: "DevOps và Triển khai"
+title: "Workflow Design & Reliability"
 weight: 7
 ---
 
-## 7.1 Docker — Container hóa ứng dụng
+# Chương 7 — Workflow Design & Reliability: edge case, failback, Human-in-the-Loop, governance
 
-Docker là một nền tảng (platform) cho phép bạn đóng gói ứng dụng cùng toàn bộ dependencies (thư viện, cấu hình, biến môi trường) vào một đơn vị gọi là **container**. Container đảm bảo ứng dụng chạy đồng nhất trên mọi máy — từ laptop của bạn đến server production. Trong AI20K, 100% BTC chấm điểm DevOps, và Docker là công cụ nền tảng để đạt điểm cao.
+> 📊 **Bằng chứng cohort —** Ba con số từ các cohort trước giải thích vì sao chương này tồn tại: (1) **11/12 đội** chỉ có guardrail 1 lớp prompt-only — prompt bị lật là cả hệ thống trần trụi; (2) đội **002** từng viết `except Exception: return default` — AI chạy regression giữa chừng mà không ai biết, đây là "silent fallback" kinh điển; (3) đội **Gamma** để session hết hạn giữa bài thi 35 phút, state không persist — user mất trắng tiến độ (G-06), MCQ click không register và không có toast chỉ câu thiếu (G-08). Cả ba lỗi đều không phải lỗi AI — chúng là **lỗi thiết kế workflow**. Chương này trang bị bộ tư duy và checklist để không lặp lại.
 
-Trước Docker, developer thường gặp "tối thứ Sáu" — ứng dụng chạy trên máy mình nhưng lỗi trên server. Nguyên nhân là sự khác biệt về phiên bản Python, thư viện hệ thống, biến môi trường. Docker giải quyết vấn đề này bằng cách đóng gói toàn bộ runtime environment vào một image bất biến (immutable image). Bạn build một lần, chạy ở đâu cũng được.
+Nguyên tắc xuyên suốt: **thiết kế cho đáng tin cậy trước, tự động hóa sau**. Tự động hóa một quy trình rác = tự động hóa cái rác, với tốc độ nhanh hơn.
 
-**Image vs Container** là hai khái niệm cốt lõi cần phân biệt:
+---
 
-- **Image** (ảnh): bản thiết kế (blueprint) bất biến, chứa OS, runtime, code, dependencies. Image được build từ `Dockerfile` và lưu trong registry (Docker Hub, GitHub Container Registry).
-- **Container** (thùng chứa): một instance đang chạy của image. Bạn có thể chạy nhiều container từ cùng một image, mỗi container có trạng thái riêng.
+## 7.1 Value stream — vẽ IPO cho luồng sản phẩm
 
-Ví dụ vòng đời Docker cơ bản:
+Mọi quy trình, dù đơn giản đến đâu, đều là **Input → Process → Output (IPO)**. Trước khi viết dòng code nào, bạn phải vẽ được luồng này và trả lời 2 câu hỏi:
 
-```bash
-# Build image từ Dockerfile
-docker build -t my-agent-api:latest .
+1. **AI ở đâu?** — bước nào cần suy luận phi cấu trúc (sinh văn bản, phân loại mơ hồ, tóm tắt)?
+2. **Người ở đâu?** — bước nào cần phán quyết, chịu trách nhiệm, hoặc xử lý khi AI không chắc?
 
-# Chạy container từ image
-docker run -d -p 8000:8000 --name my-api my-agent-api:latest
+### Ví dụ IPO: chatbot tư vấn tuyển sinh (kiểu đội Alpha)
 
-# Xem log container
-docker logs my-api
+| Pha | Nội dung | AI / Người | Ghi chú rủi ro |
+|---|---|---|---|
+| **Input** | Câu hỏi user qua chat; KB học bổng, hạn nộp | Người soạn KB | KB nghèo = AI bịa (lỗi Alpha cohort trước) |
+| **Process** | Phân loại intent → retrieve KB → sinh câu trả lời có citation | AI | Cần guardrail 2 lớp (mục 7.7) |
+| **Output** | Câu trả lời + link nguồn; nếu confidence thấp → chuyển người tư vấn | AI + Người | Đây là điểm HITL (mục 7.5) |
 
-# Dừng container
-docker stop my-api
+Nếu bạn không vẽ được bảng này trong 15 phút, bạn chưa hiểu đủ luồng sản phẩm mình đang build. Cohort trước cho thấy hệ quả: nhiều đội build feature trước, phát hiện messaging lệch giá trị cốt lõi sau (Beta default Direct answer thay vì Socratic — ngược value prop của chính mình).
 
-# Xóa container
-docker rm my-api
+### Bài tập nhanh
 
-# Xóa image
-docker rmi my-agent-api:latest
-```
+Vẽ IPO cho sản phẩm đội bạn trong 1 bảng 3 hàng (Input/Process/Output), mỗi bước ghi rõ AI hay Người và một rủi ro có thể xảy ra ở bước đó.
 
-Vòng đời hoàn chỉnh: viết `Dockerfile` → build image → chạy container → push image lên registry → pull trên server → chạy production.
+---
 
-> 💡 **MẸO:** Hãy luôn tag image với version cụ thể (ví dụ `my-agent-api:1.0.3`) thay vì chỉ dùng `latest`. Tag `latest` gây nhầm lẫn khi rollback và không đảm bảo reproducibility.
+## 7.2 Sáu thuộc tính của quy trình đáng tin cậy
 
-Một số lệnh Docker hữu ích khác khi làm việc hàng ngày:
+Đây là bộ tiêu chí tự kiểm trước khi đưa workflow ra production. Mỗi thuộc tính kèm **cách kiểm chứng** — thuộc tính không kiểm chứng được chỉ là lời hứa.
 
-```bash
-# Xem tất cả container đang chạy
-docker ps
+| # | Thuộc tính | Nghĩa | Cách kiểm chứng |
+|---|---|---|---|
+| 1 | **Fault-tolerant** (chịu lỗi) | Một node fail không sập cả workflow; có nhánh fallback rõ ràng | Tắt node giữa (mock raise) → workflow vẫn trả kết quả hoặc thông báo lỗi hiểu được cho user |
+| 2 | **Observable** (quan sát được) | Mọi bước log trạng thái OK/WARN/FAIL, đủ truy nguyên nhân | Giả định: nửa đêm server lỗi — sáng ra đọc log trả lời được "chỗ nào fail, input gì, bao nhiêu case" |
+| 3 | **Scalable** (mở rộng được) | 1 user hay 100 user gửi đồng thời vẫn ổn | Test gửi 10 request song song — không có ERR_ABORTED kiểu đội Alpha (A-02) |
+| 4 | **Workable** (làm được) | User thật đi hết luồng giá trị cốt lõi mà không bị chặn | Smoke-test E2E đường "vàng" mỗi lần deploy (Gamma bị chặn 2 lần ngay bước đăng nhập) |
+| 5 | **Idempotent** (lặp an toàn) | Chạy lại cùng input không sinh kết quả trùng/lệch | Gọi API 2 lần cùng payload → không tạo 2 bản ghi, không charge 2 lần |
+| 6 | **Auditable** (kiểm toán được) | Truy ngược được: ai/yếu tố nào quyết định gì, lúc nào | Xem 1 output xấu → truy được trace: prompt nào, context nào, bước nào duyệt |
 
-# Xem tất cả container (kể đã dừng)
-docker ps -a
+Hai thuộc tính cohort trước yếu nhất: **Workable** (không đội nào tự phát hiện lỗi của mình — mọi CRITICAL do QA bên ngoài phát hiện) và **Observable** (silent fallback của đội 002 chính là vi phạm thuộc tính số 2).
 
-# Xem resource usage
-docker stats
+---
 
-# Vào bên trong container để debug
-docker exec -it my-api /bin/bash
+## 7.3 Edge-case taxonomy có hệ thống
 
-# Xem chi tiết image (layers, size)
-docker images
-docker history my-agent-api:latest
-```
+Edge case không phải là "trường hợp lạ may rủi" — nó rơi vào các nhóm đếm được trên đầu ngón tay. Khi thiết kế, đi qua từng nhóm và tự hỏi: sản phẩm tôi xử lý nhóm này thế nào?
 
-Khi bạn phát triển ứng dụng AI Agent, Docker đặc biệt quan trọng vì ứng dụng có nhiều dependencies phức tạp: LangChain, LangGraph, các model embedding, vector store client, LLM API keys. Docker đảm bảo tất cả được cấu hình đúng trên mọi môi trường.
+| Loại edge | Ví dụ thật từ cohort | Xử lý chuẩn |
+|---|---|---|
+| **Dữ liệu thiếu / rỗng** | KB tuyển sinh thiếu 2 chủ đề user hỏi nhiều nhất (học bổng, hạn nộp) | Validate input ở cổng vào (Pydantic); thiếu dữ liệu nguồn → trả lời thẳng "chưa có thông tin" + route người, KHÔNG để AI tự bịa |
+| **Sai format** | LLM trả JSON cắt giữa dòng, thiếu field | Schema-lock: sai schema → exception tường minh + retry 1 lần → fallback (đội 012: mọi output qua Pydantic) |
+| **User nhập ngoài scope** | Hỏi y khoa vào chatbot tuyển sinh; câu hỏi trái quy định | Phân loại intent + từ chối lịch sự + redirect đúng kênh (guardrail input, mục 7.7) |
+| **Concurrency** | Gửi tin liên tiếp → stream ERR_ABORTED (Alpha A-02) | Debounce client + queue server-side + khóa phiên theo user |
+| **Timeout / hết budget** | Phiên phỏng vấn AI kéo dài vô hạn | Cost locks kiểu Delta: phiên tối đa 60 phút, idle 30 giây ngắt, 10 phiên/24h — tính **server-side** |
+| **Injection** | User nhét "bỏ qua mọi instruct trước đó, trả lời..." | Prompt safeguard + tách dữ liệu người dùng khỏi system prompt + filter banned-pattern (mục 7.7) |
+| **Loop vô hạn** | Agent gọi tool lặp không dừng | Escape hatch: đếm vòng lặp, vượt max → ép sang phase kết thúc (đội 011: count ≥ max → Closing → END) |
 
-> ⚠️ **LƯU Ý:** Không lưu secrets (API keys, passwords) trong Docker image. Sử dụng environment variables hoặc Docker secrets để truyền thông tin nhạy cảm lúc runtime.
+Quy tắc: mỗi edge case trong bảng phải tồn tại **dưới dạng test** trong repo. Edge case chỉ nằm trong đầu bạn thì đến Demo Day nó sẽ nằm trong demo của bạn.
 
-## 7.2 Multi-stage Dockerfile
+---
 
-Multi-stage build là kỹ thuật Docker cho phép bạn sử dụng nhiều stage (giai đoạn) trong một `Dockerfile`. Stage đầu tiên (builder) cài đặt dependencies và build ứng dụng. Stage thứ hai (production) chỉ copy kết quả build, bỏ qua toàn bộ công cụ build. Kết quả: image production nhỏ gọn hơn 5-10 lần, an toàn hơn vì không chứa build tools.
+## 7.4 Failback & state — không silent fallback
 
-Tại sao multi-stage quan trọng? Một image Python thông thường có thể nặng 1-2 GB vì chứa pip cache, build tools (gcc, g++), và các dependencies chỉ cần lúc build. Multi-stage giảm xuống còn 200-400 MB, tiết kiệm bandwidth khi deploy và giảm attack surface.
-
-Dưới đây là `Dockerfile` hoàn chỉnh cho ứng dụng LangGraph + FastAPI:
-
-```dockerfile
-# ============================================
-# Stage 1: Builder — cài đặt dependencies
-# ============================================
-FROM python:3.11-slim AS builder
-
-WORKDIR /app
-
-# Cài build tools cần thiết cho compile C extensions
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements trước — tận dụng Docker layer caching
-COPY requirements.txt .
-
-# Cài Python dependencies vào virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir -r requirements.txt
-
-# ============================================
-# Stage 2: Production — image cuối cùng
-# ============================================
-FROM python:3.11-slim AS production
-
-# Thiết lập biến môi trường
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH" \
-    PORT=8000
-
-WORKDIR /app
-
-# Tạo non-root user cho bảo mật
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# Copy virtual environment từ builder stage
-COPY --from=builder /opt/venv /opt/venv
-
-# Copy source code
-COPY . .
-
-# Chown tất cả file cho appuser
-RUN chown -R appuser:appuser /app
-
-# Chuyển sang non-root user
-USER appuser
-
-# Expose port
-EXPOSE 8000
-
-# Health check — kiểm tra API còn sống
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-# Chạy ứng dụng với uvicorn
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-Giải thích chi tiết từng phần:
-
-**Layer caching:** Docker build theo từng layer (từng lệnh trong Dockerfile). Khi bạn sửa code, chỉ các layer từ `COPY . .` trở đi bị rebuild. Nếu `requirements.txt` không đổi, layer `pip install` được cache — tiết kiệm 2-5 phút mỗi lần build. Đây là lý do `COPY requirements.txt` đặt trước `COPY . .`.
-
-**Non-root user:** Mặc định Docker chạy container với user `root`. Nếu attacker khai thác lỗ hổng trong ứng dụng, họ có quyền root trong container. Tạo `appuser` giới hạn quyền truy cập, tuân thủ nguyên tắc least privilege (quyền tối thiểu).
-
-**HEALTHCHECK directive:** Docker tự động kiểm tra sức khỏe container mỗi 30 giây. Nếu kiểm tra thất bại 3 lần liên tiếp, container được đánh dấu `unhealthy` và orchestrator (Docker Compose, Kubernetes) có thể tự động restart. Điều này đảm bảo tính available cho API.
-
-> 🔑 **ĐIỂM CHÍNH:** Luôn sử dụng multi-stage build cho production. Image nhỏ hơn, an toàn hơn, và deploy nhanh hơn. Stage 1 build, Stage 2 chạy — pattern này áp dụng cho mọi ứng dụng Python.
-
-Thêm file `.dockerignore` để loại bỏ file không cần thiết:
-
-```text
-__pycache__/
-*.pyc
-*.pyo
-.env
-.git
-.gitignore
-.venv/
-venv/
-*.md
-tests/
-.dockerignore
-Dockerfile
-docker-compose.yml
-```
-
-File `.dockerignore` giống `.gitignore` — ngăn các file không cần thiết vào Docker context, giúp build nhanh hơn và image nhỏ hơn.
-
-## 7.3 Docker Compose — Quản lý nhiều dịch vụ
-
-Docker Compose là công cụ cho phép bạn định nghĩa và chạy nhiều container (nhiều dịch vụ) cùng lúc bằng một file YAML. Thay vì gõ 5-6 lệnh `docker run` dài dòng, bạn viết một file `docker-compose.yml` và chạy `docker compose up` — mọi thứ tự động khởi động, kết nối mạng, và quản lý vòng đời.
-
-Trong ứng dụng AI Agent điển hình, bạn cần ít nhất 3-4 dịch vụ chạy cùng nhau: API server, database (PostgreSQL), vector store (Chroma/PGVector), và có thể Redis cho caching. Docker Compose quản lý toàn bộ stack này.
-
-Dưới đây là `docker-compose.yml` hoàn chỉnh cho dự án AI Agent:
-
-```yaml
-version: "3.9"
-
-services:
-  # ============================================
-  # API Server — FastAPI + LangGraph
-  # ============================================
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: agent-api
-    ports:
-      - "8000:8000"
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DATABASE_URL=postgresql://agentuser:agentpass@db:5432/agentdb
-      - REDIS_URL=redis://redis:6379/0
-      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
-      - LANGSMITH_PROJECT=ai20k-agent
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    volumes:
-      - ./src:/app/src  # Hot reload khi dev
-    networks:
-      - agent-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 256M
-          cpus: "0.25"
-    restart: unless-stopped
-
-  # ============================================
-  # PostgreSQL — Database chính
-  # ============================================
-  db:
-    image: postgres:16-alpine
-    container_name: agent-db
-    environment:
-      POSTGRES_USER: agentuser
-      POSTGRES_PASSWORD: agentpass
-      POSTGRES_DB: agentdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentuser -d agentdb"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - agent-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.25"
-    restart: unless-stopped
-
-  # ============================================
-  # Redis — Cache & Session Store
-  # ============================================
-  redis:
-    image: redis:7-alpine
-    container_name: agent-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - agent-network
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.1"
-    restart: unless-stopped
-
-# ============================================
-# Named Volumes — Data persistence
-# ============================================
-volumes:
-  postgres-data:
-    driver: local
-  redis-data:
-    driver: local
-
-# ============================================
-# Network — Cách ly các dịch vụ
-# ============================================
-networks:
-  agent-network:
-    driver: bridge
-```
-
-Giải thích các khái niệm chính:
-
-**depends_on với condition:** Service `api` sẽ đợi `db` và `redis` healthy trước khi khởi động. Nếu không có `condition`, API có thể start trước khi database sẵn sàng → connection error. `service_healthy` đảm bảo API chỉ start khi healthcheck của dependencies pass.
-
-**Named volumes:** `postgres-data` và `redis-data` là named volumes — dữ liệu được lưu ngoài container. Khi bạn chạy `docker compose down`, container bị xóa nhưng data vẫn còn. Chạy `docker compose down -v` mới xóa data. Đây là cách bảo vệ data quan trọng khỏi mất mát.
-
-**Resource limits:** `deploy.resources.limits` giới hạn memory và CPU cho mỗi container. Nếu API bị memory leak (rất phổ biến với Python + AI models), nó chỉ dùng tối đa 512MB thay vì chiếm toàn bộ RAM server, ảnh hưởng đến các dịch vụ khác.
-
-> 💡 **MẸO:** Khi phát triển (development), thêm `volumes: - ./src:/app/src` để hot reload — thay đổi code trên máy local sẽ lập tức phản ánh trong container. Khi deploy production, xóa dòng này đi.
-
-Các lệnh Docker Compose cần biết:
-
-```bash
-# Khởi động tất cả dịch vụ (nền)
-docker compose up -d
-
-# Xem log tất cả dịch vụ
-docker compose logs -f
-
-# Xem log một dịch vụ cụ thể
-docker compose logs -f api
-
-# Khởi động lại một dịch vụ
-docker compose restart api
-
-# Dừng tất cả (giữ data)
-docker compose down
-
-# Dừng tất cả (xóa data)
-docker compose down -v
-
-# Rebuild và khởi động
-docker compose up -d --build
-```
-
-> ⚠️ **LƯU Ý:** Không commit `docker-compose.yml` chứa password thật vào git. Sử dụng `.env` file cho secrets và thêm `.env` vào `.gitignore`. Docker Compose tự động đọc file `.env` trong cùng thư mục.
-
-## 7.4 CI/CD với GitHub Actions
-
-CI/CD là viết tắt của Continuous Integration (Tích hợp liên tục) và Continuous Deployment (Triển khai liên tục). CI đảm bảo mỗi lần push code lên GitHub, toàn bộ test suite tự động chạy — phát hiện lỗi sớm trước khi merge. CD tự động deploy lên server khi code pass tất cả tests. Đây là lỗi phổ biến nhất và mất điểm nghiêm trọng ở tiêu chí DevOps — phần lớn đội bỏ qua CI/CD.
-
-GitHub Actions là CI/CD platform tích hợp sẵn trong GitHub. Bạn định nghĩa workflow bằng file YAML trong thư mục `.github/workflows/`. Mỗi workflow chứa một hoặc nhiều job, mỗi job chứa nhiều step (bước). Workflow được trigger bởi events như push, pull request, hoặc manual dispatch.
-
-Dưới đây là workflow CI hoàn chỉnh:
-
-```yaml
-# .github/workflows/ci.yml
-name: CI — Lint, Test, Build
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-
-jobs:
-  # ============================================
-  # Job 1: Lint & Format Check
-  # ============================================
-  lint:
-    name: Lint với Ruff
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Ruff
-        run: pip install ruff
-
-      - name: Run Ruff check
-        run: ruff check . --output-format=github
-
-      - name: Check formatting
-        run: ruff format --check .
-
-  # ============================================
-  # Job 2: Run Tests
-  # ============================================
-  test:
-    name: Chạy Tests
-    runs-on: ubuntu-latest
-    needs: lint  # Chỉ chạy sau khi lint pass
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov httpx
-
-      - name: Run tests with coverage
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-report
-          path: coverage.xml
-
-  # ============================================
-  # Job 3: Build Docker Image
-  # ============================================
-  build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: test  # Chỉ chạy sau khi test pass
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          tags: agent-api:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-```
-
-**Giải thích workflow:**
-
-Workflow này có 3 jobs chạy tuần tự: lint → test → build. Nếu lint thất bại, test và build không chạy — tiết kiệm tài nguyên. Nếu test thất bại, build không chạy — không build code có lỗi.
-
-**Lint với Ruff:** Ruff là Python linter và formatter siêu nhanh (viết bằng Rust), thay thế Flake8, isort, Black. Nó kiểm tra code style, import order, unused imports, và nhiều lỗi phổ biến khác. Output format `github` tạo annotation trực tiếp trên pull request — reviewer thấy lỗi ngay trên diff.
-
-**Cache pip dependencies:** Action `actions/cache` lưu cache của pip, tránh download lại 100+ packages mỗi lần chạy. Key cache dựa trên hash của `requirements.txt` — chỉ invalidate khi dependencies thay đổi.
-
-> 🔑 **ĐIỂM CHÍNH:** Luôn có ít nhất lint + test trong CI pipeline. Đây là dấu hiệu chuyên nghiệp nhất cho BTC. Phần lớn đội không có CI/CD — chỉ cần bạn có, bạn đã vượt xa.
-
-**Deploy workflow** riêng cho production:
-
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy to Production
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:  # Cho phép trigger thủ công
-
-jobs:
-  deploy:
-    name: Deploy lên Render
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Trigger Render Deploy Hook
-        run: |
-          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
-
-      - name: Notify deployment
-        run: |
-          echo "Deployed commit ${{ github.sha }} to production"
-```
-
-Workflow này tự động deploy mỗi khi code được merge vào nhánh `main`. Nó gọi Render Deploy Hook qua HTTP POST — Render sẽ pull image mới nhất và deploy.
-
-## 7.5 Deploy lên Cloud
-
-Sau khi đã có Docker image và CI/CD pipeline, bước tiếp theo là deploy ứng dụng lên cloud để người dùng thực sự truy cập được. Trong AI20K, Live URL (URL truy cập được) là một trong 10 deliverables bắt buộc.
-
-Có nhiều lựa chọn deploy, nhưng đây là những lựa chọn tốt nhất cho dự án AI Agent:
-
-### Backend — Render hoặc Railway
-
-**Render** (render.com) là platform-as-a-service (PaaS) cho phép deploy ứng dụng từ Docker image hoặc git repository. Ưu điểm: free tier, tự động SSL, tự động deploy từ GitHub, hỗ trợ Docker.
-
-**Railway** (railway.app) tương tự Render nhưng có UX thân thiện hơn và hỗ trợ thêm nhiều loại database. Cả hai đều phù hợp cho AI20K.
-
-Các bước deploy lên Render:
-
-1. Đăng ký Render bằng GitHub account
-2. Chọn "New Web Service" → "Build and deploy from a Docker image"
-3. Connect GitHub repository
-4. Thêm environment variables: `OPENAI_API_KEY`, `DATABASE_URL`, `LANGSMITH_API_KEY`
-5. Chọn instance type: Free (512MB RAM) hoặc Starter ($7/tháng)
-6. Render tự động build Docker image và deploy
-
-**Environment variables** là nơi lưu cấu hình và secrets. Trên Render, bạn thêm trong Dashboard → Environment:
-
-```
-OPENAI_API_KEY=sk-proj-xxxxx
-DATABASE_URL=postgresql://user:pass@host:5432/db
-LANGSMITH_API_KEY=lsv2_pt_xxxxx
-LANGSMITH_PROJECT=ai20k-agent-production
-ENVIRONMENT=production
-LOG_LEVEL=INFO
-```
-
-### Frontend — Vercel
-
-Nếu bạn có giao diện web (React, Next.js, Streamlit), deploy lên **Vercel** (vercel.com). Vercel tối ưu cho frontend, có CDN global, và free tier rất hào phóng.
-
-```bash
-# Deploy frontend lên Vercel
-npm install -g vercel
-vercel --prod
-```
-
-### Custom Domain
-
-Mua domain từ Namecheap hoặc GoDaddy (~$10/năm), trỏ DNS về Render/Vercel:
-
-- Render: thêm custom domain trong Settings → Custom Domains
-- Vercel: thêm trong Project Settings → Domains
-- CNAME record: `your-subdomain.yourdomain.com` → `your-app.onrender.com`
-
-> 💡 **MẸO:** Mua domain `.app` hoặc `.dev` — Google tự động bật HTTPS cho các TLD này, tiết kiệm cấu hình SSL. Domain `.me` cũng phổ biến cho project demo.
-
-Kiểm tra sau khi deploy:
-
-```bash
-# Test health endpoint
-curl https://your-app.onrender.com/health
-
-# Test API endpoint
-curl https://your-app.onrender.com/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Xin chào", "thread_id": "test-123"}'
-
-# Kiểm tra response time
-curl -o /dev/null -s -w "Time: %{time_total}s\n" \
-  https://your-app.onrender.com/health
-```
-
-> ⚠️ **LƯU Ý:** Render free tier "sleeps" sau 15 phút không có request. Lần truy cập đầu tiên sau sleep mất 30-60 giây để "wake up". Dùng cron job (như UptimeRobot) ping mỗi 5 phút để giữ server awake, hoặc upgrade lên paid plan.
-
-## 7.6 Monitoring và Logging
-
-Monitoring (giám sát) và Logging (ghi log) là hai pilre của vận hành ứng dụng production. Không có monitoring, bạn không biết ứng dụng đang chạy tốt hay không. Không có logging, bạn không thể debug khi có lỗi. Trong tiêu chí DevOps của AI20K, monitoring và logging là yếu tố phân biệt giữa điểm trung bình và điểm cao.
-
-### Python Logging Setup
-
-Python có thư viện `logging` tích hợp sẵn, nhưng cấu hình mặc định khá cơ bản. Dưới đây là cấu hình logging production-ready:
+### Tội danh: silent fallback
 
 ```python
-# src/core/logging_config.py
-import logging
-import sys
-import json
-from datetime import datetime, timezone
-
-
-class JSONFormatter(logging.Formatter):
-    """Format log thành JSON structured logging."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "module": record.module,
-            "function": record.funcName,
-            "line": record.lineno,
-        }
-
-        # Thêm extra fields nếu có
-        if hasattr(record, "extra_data"):
-            log_entry["data"] = record.extra_data
-
-        # Thêm exception info nếu có
-        if record.exc_info and record.exc_info[0] is not None:
-            log_entry["exception"] = {
-                "type": record.exc_info[0].__name__,
-                "message": str(record.exc_info[1]),
-            }
-
-        return json.dumps(log_entry, ensure_ascii=False)
-
-
-def setup_logging(log_level: str = "INFO") -> None:
-    """Cấu hình logging cho ứng dụng."""
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, log_level.upper()))
-
-    # Handler cho stdout (console)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(JSONFormatter())
-    root_logger.addHandler(console_handler)
-
-    # Giảm log level cho các thư viện noisy
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+# ANTI-PATTERN — đội 002 cohort trước
+try:
+    result = run_ai_analysis(data)
+except Exception:
+    return default_answer   # AI chết âm thầm, user và dev đều không hay
 ```
 
-**Structured logging** (logging có cấu trúc) ghi log dưới dạng JSON thay vì plain text. Ưu điểm: dễ parse, dễ search, dễ integrate với công cụ monitoring như ELK Stack, Datadog, Grafana Loki.
+Vấn đề không phải là có fallback — fallback là bắt buộc. Vấn đề là **âm thầm**: hệ thống chuyển sang chế độ kém chất lượng mà không ai biết. Với lỗi kiểu này, quy trình bắt buộc là viết **RCA (Root Cause Analysis)**: đội 002 sau đó chính là đội có file `ROOT_CAUSE_ANALYSIS.md` trong repo — biến sai lầm thành tài liệu.
+
+### Chuẩn: log FAILED + fallback rõ ràng cho user
 
 ```python
-# Cách sử dụng logging trong code
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("workflow")
 
-@app.post("/api/v1/chat")
-async def chat(request: ChatRequest):
-    logger.info(
-        "Processing chat request",
-        extra={
-            "extra_data": {
-                "thread_id": request.thread_id,
-                "message_length": len(request.message),
-            }
-        },
-    )
+def safe_ai_step(data: dict) -> dict:
     try:
-        response = await agent.arun(request.message)
-        logger.info(
-            "Chat request completed",
-            extra={
-                "extra_data": {
-                    "thread_id": request.thread_id,
-                    "response_length": len(response),
-                }
-            },
-        )
-        return {"response": response}
-    except Exception as e:
+        return run_ai_analysis(data)
+    except Exception as exc:
         logger.error(
-            "Chat request failed",
-            exc_info=True,
-            extra={
-                "extra_data": {
-                    "thread_id": request.thread_id,
-                    "error_type": type(e).__name__,
-                }
-            },
+            "FAILED ai_step input_hash=%s reason=%s",
+            hash(str(data)), type(exc).__name__,
         )
-        raise
+        return {
+            "status": "DEGRADED",          # user BIẾT chất lượng giảm
+            "answer": None,
+            "message": "Phân tích AI tạm lỗi, hiển thị dữ liệu thô.",
+        }
 ```
 
-### LangSmith cho AI Tracing
+Ba khác biệt so với anti-pattern: (1) log dòng FAILED kèm hash input và lý do — thuộc tính Observable; (2) trạng thái `DEGRADED` tường minh — không giả vờ bình thường; (3) user nhận thông điệp rõ ràng thay vì câu trả lời mặc định ngụy trang.
 
-LangSmith là công cụ monitoring chuyên biệt cho ứng dụng LLM/LangChain/LangGraph. Nó trace từng bước của agent — từ lúc nhận input, gọi LLM, retrieve documents, đến lúc trả output. AI Logs là deliverable thường được hoàn thành tốt nhất vì dễ thiết lập.
+### State persist & resume — bài học 35 phút của Gamma
 
-Cấu hình LangSmith chỉ cần 3 environment variables:
+Gamma để user làm bài thi placement 35 phút, session hết hạn giữa chừng, state không persist → mất toàn bộ tiến độ (G-06). Đây là vi phạm thuộc tính Fault-tolerant nghiêm trọng nhất cohort. Chuẩn tối thiểu cho mọi flow dài (thi, phỏng vấn, onboarding nhiều bước):
 
-```bash
-export LANGSMITH_API_KEY="lsv2_pt_xxxxx"
-export LANGSMITH_PROJECT="ai20k-agent"
-export LANGCHAIN_TRACING_V2="true"
+- **Persist sau mỗi bước**, không chờ hết flow (checkpoint mỗi câu trả lời)
+- **Resume từ đúng chỗ** khi user quay lại — kể cả đổi tab, refresh, mất mạng
+- **Toast/indicator** khi có sự cố (G-08: MCQ click không register mà không có bất kỳ tín hiệu nào — user tưởng đã chọn)
+
+---
+
+## 7.5 Human-in-the-Loop — tiered autonomy
+
+### Quy tắc vàng
+
+> **Bước tiền bạc, PII, y tế, pháp lý, hoặc quyết định không thể đảo ngược → KHÔNG tự động hoàn toàn. Bắt buộc có con người duyệt trước khi tiếp tục.**
+
+Đây không phải tùy chọn tối ưu UX — đây là ranh giới an toàn. Tiered autonomy chia workflow thành 2 mức:
+
+- **Low-risk** (tóm tắt tài liệu, gợi ý câu hỏi, sinh nháp nội dung): AI tự chạy, audit log lại sau
+- **High-risk** (chuyển tiền, gửi email cho người thật, chẩn đoán, xóa dữ liệu, công bố kết quả): dừng lại, chờ người duyệt — hoặc tự động chạy chỉ khi confidence vượt ngưỡng đã định trước
+
+### Mermaid 1 — workflow mẫu có điểm HITL (tư vấn tuyển sinh)
+
+```mermaid
+flowchart TD
+    A["User hỏi qua chat"] --> B["AI: phan loai intent\n+ retrieve KB"]
+    B --> C{"Confidence >= 0.7?"}
+    C -- "Khong" --> H["PERSON: cho duyet, roi tra loi thu cong\nroi tra loi thu cong"]
+    C -- "Co" --> D["AI: sinh cau tra loi\nkem citation"]
+    D --> E["Guardrail 2 lop\nschema + banned-pattern"]
+    E -- "FAIL" --> F["Log FAILED\n+ thong bao loi cho user"]
+    E -- "PASS" --> G{"Cau hoi cham\nhoc bong / ho so?"}
+    G -- "Co — high-risk" --> H
+    G -- "Khong" --> I["Tra loi user\n+ ghi audit log"]
+    H --> I
+    F --> J["Ket thuc co trang thai\nFAILED — KHONG im lang"]
 ```
+
+Đọc sơ đồ: nhánh người (node `PERSON`) chỉ kích hoạt khi confidence thấp HOẶC chủ đề high-risk — mọi trường hợp còn lại AI tự chạy để giữ trải nghiệm nhanh.
+
+### LangGraph `interrupt()` + checkpointer — code mẫu
+
+LangGraph 1.x có cơ chế dựng sẵn: node gọi `interrupt()` để tạm dừng graph, checkpointer lưu state, người duyệt xong thì graph resume từ đúng chỗ — không mất state kiểu Gamma.
 
 ```python
-# Trong app, LangSmith tự động trace khi biến môi trường được set
-# Không cần code thêm — chỉ cần import langchain
-import os
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
 
-# Verify LangSmith config
-assert os.getenv("LANGCHAIN_TRACING_V2") == "true", "LangSmith not configured"
+
+class State(TypedDict):
+    question: str
+    answer: str
+    approved: bool
+
+
+def draft(state: State) -> dict:
+    return {"answer": f"Nhap luu cho: {state['question']}"}
+
+
+def human_review(state: State) -> dict:
+    verdict = interrupt(          # graph DUNG o day, state da duoc luu
+        {"answer": state["answer"], "note": "Duyet truoc khi gui?"}
+    )
+    return {"approved": verdict == "APPROVE"}
+
+
+def send(state: State) -> dict:
+    return {"answer": state["answer"] + " [da gui]"}
+
+
+g = StateGraph(State)
+g.add_node("draft", draft)
+g.add_node("review", human_review)
+g.add_node("send", send)
+g.add_edge(START, "draft")
+g.add_edge("draft", "review")
+g.add_edge("send", END)
+g.add_conditional_edges("review", lambda s: "send" if s["approved"] else END)
+
+graph = g.compile(checkpointer=MemorySaver())
+cfg = {"configurable": {"thread_id": "t1"}}
+result = graph.invoke({"question": "Ho so hoc bong?"}, cfg)
+# result dung tai node review — lay ve interrupt payload, nguoi duyet roi:
+result = graph.invoke(Command(resume="APPROVE"), cfg)   # resume tu review
 ```
 
-Trên LangSmith dashboard, bạn sẽ thấy:
-- Mỗi request là một trace
-- Mỗi bước trong graph là một span
-- Token usage, latency, cost cho mỗi LLM call
-- Input/output của mỗi node — debug dễ dàng
+Điểm mấu chốt: `MemorySaver` (hoặc `SqliteSaver` cho production — đội 011 dùng SqliteSaver) lưu state tại điểm interrupt; nếu process chết, thread_id cho phép resume không mất tiến độ.
 
-### Health Check Endpoint
+### Bảng quyết định — workflow của BẠN cần HITL ở đâu?
 
-Health check endpoint là URL mà monitoring tools gọi định kỳ để kiểm tra ứng dụng còn sống và hoạt động đúng:
+| Dấu hiệu bước | Tự động hoàn toàn? | Lý do |
+|---|---|---|
+| Sinh nháp nội dung nội bộ, không ai đọc ngay cũng không sao | Có — low-risk | Sai thì sửa được |
+| Gửi tin nhắn / email tới người ngoài đội | **Không** — cần duyệt | Ảnh hưởng người thật, khó rút lại |
+| Xử lý PII (hồ sơ, transcript, điểm số) | **Không** tối thiểu phải PII-filter + duyệt | Ràng buộc pháp lý, niềm tin |
+| Gợi ý liên quan y tế / sức khỏe | **Không** — route khẩn cấp nếu cần | Đội 005: danger_keywords → emergency ngay lập tức |
+| Quyết định tài chính, công bố kết quả, xóa dữ liệu | **Không — tuyệt đối** | Irreversible |
+
+### Mermaid 2 — tiered-autonomy decision flow
+
+```mermaid
+flowchart TD
+    A["Bước trong workflow"] --> B{"Hậu quả sai có\nđảo ngược được?"}
+    B -- "Khong" --> C["HITL bắt buộc\nKHÔNG tự động"]
+    B -- "Co" --> D{"Liên quan tiền bạc,\nPII, y tế, pháp lý?"}
+    D -- "Co" --> C
+    D -- "Khong" --> E{"AI confidence >=\nngưỡng định trước?"}
+    E -- "Co" --> F["Tự động + audit log"]
+    E -- "Khong / khong do duoc" --> G["HITL theo confidence\n(low-confidence → human)"]
+    F --> H["Checkpoint giám sát\nđịnh kỳ bởi người"]
+    G --> H
+    C --> I["Người duyệt xong mới\nchạy tiếp + log người duyệt"]
+```
+
+---
+
+## 7.6 AI governance mini — audit log, trách nhiệm, escalation
+
+Governance không phải trang Privacy Policy tĩnh (đội Alpha từng để link Privacy Policy chết `#` — trong khi sản phẩm là B2B xử lý PII). Governance là **cơ chế chạy trong code**. Ba thành phần tối thiểu:
+
+### 1. Audit log — mọi bước AI để lại dấu vết
+
+Mỗi lần AI ra quyết định, ghi audit log theo **schema canonical duy nhất** định nghĩa ở [Chương Privacy](chapter-11.md) §11.7 (ts, user hash, input_hash, output_hash, model_version, risk_level, human_approved — không lưu output/PII gốc). Đội 002 kèm artifacts eval vào repo là cùng tư duy — quyết định phải truy ngược được.
+
+### 2. Ai chịu trách nhiệm khi AI sai?
+
+Trả lời trước khi ship, bằng 1 câu viết được trong README: **"Khi output của sản phẩm gây hậu quả X, người/bộ phận chịu trách nhiệm là Y, vì Z."** Ví dụ chuẩn: MommyCare (005) không để AI tư vấn y tế tự chịu — AI chỉ phân loại, câu hỏi có `danger_keywords` chuyển emergency, nguồn không chính thống bị hạ `safety_level` xuống warning. Trách nhiệm nằm ở thiết kế hệ thống, không nằm ở model.
+
+### 3. Escalation path — đường lên khi vượt tầm
+
+Workflow phải có tầng thoát lên cao hơn: AI không chắc → reviewer người → reviewer không xử lý được → kênh con người thật (hotline, 115, on-call). Đội Delta làm đúng: AI **từ chối** phỏng vấn thật và chuyển humans-in-charge khi vượt phạm vi luyện tập.
+
+Checklist governance 1 trang (đặt cạnh IPO của bạn):
+
+- [ ] Audit log ghi mọi bước AI quyết định (không lưu PII gốc)
+- [ ] Câu trả lời "ai chịu trách nhiệm khi AI sai" viết rõ trong README
+- [ ] Escalation path vẽ trên sơ đồ workflow, có ít nhất 1 đích đến là người
+- [ ] Cost lock + rate limit server-side (không chỉ client)
+
+---
+
+## 7.7 Guardrail 2 lớp — code validation + prompt safeguard
+
+Bằng chứng cohort: **11/12 đội guardrail 1 lớp prompt-only**. Prompt là lớp mỏng — bị lật bởi jailbreak, bị sai bởi model yếu, bị quên bởi model mới. Lớp thứ hai phải nằm trong **code**, chạy trước và sau AI, không thể bị thuyết phục.
+
+### Lớp 1 — code validation: Pydantic schema-lock + banned-pattern
 
 ```python
-# src/api/health.py
-from fastapi import APIRouter, Depends
-from datetime import datetime, timezone
-import logging
+from pydantic import BaseModel, ValidationError
 
-router = APIRouter()
-logger = logging.getLogger(__name__)
+BANNED = ("ignore previous", "bo qua chi dan", "dien ngay lap tuc")
 
+class TriageOutput(BaseModel):          # schema-lock: sai format -> exception
+    level: str                          # "routine" | "warning" | "emergency"
+    reason: str
 
-@router.get("/health")
-async def health_check():
-    """
-    Health check endpoint cho monitoring.
-    Kiểm tra: API sống, database kết nối, các dependencies.
-    """
-    checks = {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "1.0.0",
-    }
+def check_input(text: str) -> str | None:
+    low = text.lower()
+    for pat in BANNED:                  # banned-pattern guard
+        if pat in low:
+            return "BLOCKED_INJECTION"
+    return None
 
-    # Kiểm tra database connection
+def guard(ai_result: dict) -> TriageOutput:
     try:
-        # Thay bằng logic check thực tế của bạn
-        # async with db.session() as session:
-        #     await session.execute(text("SELECT 1"))
-        checks["database"] = "connected"
-    except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        checks["database"] = "disconnected"
-        checks["status"] = "degraded"
-
-    # Kiểm tra LLM API
-    try:
-        # Có thể ping OpenAI API nhẹ
-        checks["llm_api"] = "reachable"
-    except Exception as e:
-        logger.error(f"LLM API health check failed: {e}")
-        checks["llm_api"] = "unreachable"
-        checks["status"] = "degraded"
-
-    status_code = 200 if checks["status"] == "healthy" else 503
-    return JSONResponse(content=checks, status_code=status_code)
-
-
-@router.get("/health/live")
-async def liveness_probe():
-    """Kubernetes liveness probe — chỉ kiểm tra process còn sống."""
-    return {"status": "alive"}
-
-
-@router.get("/health/ready")
-async def readiness_probe():
-    """Kubernetes readiness probe — kiểm tra sẵn sàng nhận traffic."""
-    # Kiểm tra tất cả dependencies
-    return {"status": "ready"}
+        return TriageOutput.model_validate(ai_result)
+    except ValidationError as exc:
+        raise RuntimeError(f"FAILED schema: {exc.errors()[:2]}") from exc
 ```
 
-> 🔑 **ĐIỂM CHÍNH:** Ba công cụ monitoring cần có: (1) Structured logging cho application logs, (2) LangSmith cho AI tracing, (3) Health check endpoint cho uptime monitoring. BTC đặc biệt chú ý AI Logs — đây là bằng chứng rõ ràng nhất rằng agent hoạt động đúng.
+Đội 012 (ResearchKit) áp dụng triệt để nhất: **mọi** output AI qua Pydantic, sai schema → exception tường minh, không bao giờ nuốt. Đội 010 thêm sandbox AST-block chặn import module nguy hiểm.
 
-## Tóm tắt
+### Lớp 2 — prompt safeguard
 
-Trong chương này, chúng ta đã tìm hiểu toàn bộ pipeline DevOps cho ứng dụng AI Agent:
+Prompt vẫn cần: chỉ định vai trò + ranh giới từ chối + yêu cầu citation + chỉ dẫn "nếu không chắc, nói không chắc". Nhưng prompt là **phòng thủ bổ trợ**, không phải phòng thủ chính.
 
-- **Docker** đóng gói ứng dụng vào container, đảm bảo chạy đồng nhất trên mọi môi trường
-- **Multi-stage Dockerfile** tạo image production nhỏ gọn, an toàn với non-root user và HEALTHCHECK
-- **Docker Compose** quản lý nhiều dịch vụ (API, database, Redis) cùng lúc với health checks và resource limits
-- **GitHub Actions CI/CD** tự động lint, test, build trên mỗi push — chuyên nghiệp và bắt buộc cho Demo Day
-- **Cloud deploy** với Render (backend) và Vercel (frontend) — đơn giản, nhanh chóng
-- **Monitoring và Logging** với structured logging, LangSmith tracing, và health check endpoint
+### Case study 1 — triage y khoa 2 lớp của đội 005 (MommyCare)
 
-DevOps là tiêu chí chấm điểm riêng trong AI20K. Phần lớn đội thiếu CI/CD và không có test. Chỉ cần bạn có Docker + CI/CD + tests + health check, bạn đã ở top về DevOps.
+Lớp code: danh sách `danger_keywords` tiếng Việt — nếu input chứa từ khóa khẩn cấp, hệ thống **bỏ qua AI**, chuyển emergency ngay lập tức. Song song, `trust_manager` phân loại nguồn: nội dung từ nguồn y khoa chính thống (Vinmec, BYT) giữ mức tin cao; thiếu nguồn → hạ `safety_level` xuống warning. Đây là guardrail by design: quyết định an toàn không phụ thuộc vào việc model có nghe lời hay không.
 
-## Câu hỏi ôn tập
+### Case study 2 — Guardrails class của đội 008 (Buddy)
 
-1. Sự khác biệt giữa Docker image và Docker container là gì?
-2. Tại sao multi-stage build làm image nhỏ hơn? Giải thích cơ chế layer caching.
-3. `depends_on` với `condition: service_healthy` khác gì với `depends_on` không có condition?
-4. Nếu GitHub Actions CI pipeline của bạn thất bại ở bước test, bước build có chạy không? Tại sao?
-5. Tại sao không nên lưu API keys trong Docker image? Cách đúng là gì?
-6. Structured logging (JSON) ưu điểm gì so với plain text logging?
-7. LangSmith trace những thông tin gì? Tại sao nó quan trọng cho AI Agent?
-8. Health check endpoint trả về HTTP status code nào khi ứng dụng không khỏe?
+Một class riêng: enum `SafetyLevel`, `ViolationType`, tách bạch `check_input` / `check_output` — input độc hại chặn trước khi vào model, output xấu chặn trước khi tới user. Đáng học nhất: test đặt tên đọc như spec — `test_blocks_grooming_secret_language` — tức hành vi an toàn được **test như functional requirement**, không phải nhận định.
+
+### Mẫu tổng hợp — guardrail 2 lớp đầu-cuối
+
+```mermaid
+flowchart LR
+    A["User input"] --> B["Lop 1 CODE:\ncheck_input + Pydantic"]
+    B -- "Block" --> X["Tu choi + log FAILED"]
+    B -- "Pass" --> C["AI model + prompt safeguard"]
+    C --> D["Lop 1 CODE:\ncheck_output + schema-lock"]
+    D -- "Fail" --> Y["Retry 1 lan\nroi fallback DEGRADED"]
+    D -- "Pass" --> E["User"]
+```
+
+---
+
+## 7.8 Bài tập tổng hợp
+
+### Bài tập 1 — IPO + self-check 6 thuộc tính (30 phút)
+
+Vẽ bảng IPO cho luồng giá trị cốt lõi của sản phẩm đội bạn (Input/Process/Output, cột AI/Người, cột rủi ro). Sau đó tự chấm thẳng thắn 6 thuộc tính ở mục 7.2 — mỗi thuộc tính 1 dòng: đạt / chưa đạt / chưa đo được.
+
+- Output: `docs/workflow-ipo.md` trong repo đội bạn — bảng IPO + bảng tự chấm 6 thuộc tính + 3 thuộc tính yếu nhất kèm kế hoạch fix.
+
+### Bài tập 2 — Edge-case table + test (45 phút)
+
+Lấy taxonomy ở mục 7.3, viết bảng edge case cho sản phẩm đội bạn: 7 loại, mỗi loại 1 ví dụ cụ thể + cách xử lý hiện tại. Mọi dòng ghi "chưa xử lý" phải có issue và ít nhất 3 dòng quan trọng nhất phải có test thật trong repo.
+
+- Output: `docs/edge-cases.md` + ít nhất 3 file test mới trong `tests/` (tên test đọc như spec, kiểu `test_blocks_out_of_scope_question`).
+
+### Bài tập 3 — Sơ đồ Mermaid workflow hoàn chỉnh (60 phút)
+
+Vẽ Mermaid workflow sản phẩm đội bạn trong phạm vi tối đa 12 node, bắt buộc đủ 4 nhóm phần tử:
+
+1. **Edge branches** — ít nhất 2 nhánh lỗi rõ ràng (failback path, trạng thái DEGRADED/FAILED)
+2. **HITL points** — ít nhất 1 node người (viết hoa `PERSON` hoặc icon tương đương) theo bảng quyết định mục 7.5
+3. **Failback paths** — mọi node AI phải có đường ra khi fail, không có dead-end
+4. **Governance checkpoints** — audit log và escalation path xuất hiện trên sơ đồ
+
+- Output: `docs/workflow-diagram.mmd` (hoặc nhúng trong README) + 1 đoạn 5 dòng giải thích vì sao mỗi điểm HITL nằm ở đó.
+
+### Bảng "lên Giỏi" — tiêu chí Sản phẩm hoàn thiện
+
+| Mức | Biểu hiện |
+|---|---|
+| **9-10 Giỏi** | Guardrail 2 lớp (code + prompt) có test theo tên spec; không silent fallback — mọi except log FAILED kèm fallback rõ ràng cho user; state persist/resume cho flow dài; ít nhất 1 điểm HITL đúng quy tắc vàng + code interrupt/checkpointer chạy được; audit log + escalation path vẽ trên sơ đồ workflow |
+| 7-8 Khá | Guardrail 2 lớp nhưng test ít; có fallback + log nhưng 1-2 chỗ còn nuốt lỗi; HITL có trên sơ đồ nhưng chưa chạy bằng cơ chế thật |
+| 5-6 TB | Guardrail chủ yếu prompt-only; fallback có nhưng một phần âm thầm; edge case liệt kê trong doc nhưng không test |
+| ≤4 Yếu | `except: return default`; không persist state; guardrail 1 lớp hoặc không có; không xác định được ai chịu trách nhiệm khi AI sai |
+
+### Exit-test chương (tự kiểm — trả lời được mới được sang chương sau)
+
+1. Guardrail của đội bạn hiện có mấy lớp? Lớp nào nằm trong code, lớp nào nằm trong prompt? Nếu prompt bị lật hoàn toàn, có gì chặn còn lại?
+2. Tìm trong repo đội bạn một chỗ `except` nuốt lỗi — nó có log FAILED không? User có biết hệ thống đang chạy chế độ degraded không?
+3. Nếu user của bạn làm dở một flow 35 phút rồi đóng tab, quay lại ngày mai — họ mất bao nhiêu tiến độ? Cơ chế nào trong code bảo đảm điều đó?
+4. Điểm HITL đầu tiên trong workflow của bạn nằm ở đâu, vì sao ở đó chứ không phải chỗ khác — tiêu chí nào trong bảng quyết định mục 7.5 áp dụng?
+
+---
+
+## Ghi chú liên kết
+
+- Guardrail an toàn nội dung chi tiết: xem [Chương Privacy](chapter-11.md) §11.4 (prompt injection + red-team).
+- Đánh giá độ tin cậy bằng eval (golden dataset, LLM-judge, pass@k/pass^k): xem chương Đánh giá hiệu quả ([chapter-10.md](chapter-10.md)).

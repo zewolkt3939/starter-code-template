@@ -6,7 +6,7 @@ weight: 1
 
 ## BMAD Method là gì?
 
-**BMAD** (Build More Architect Dreams) là framework mã nguồn mở cho AI-driven software development.
+**BMAD** (Breakthrough Method for Agile AI-Driven Development) là framework mã nguồn mở cho AI-driven software development.
 
 - **GitHub:** github.com/bmad-code-org/BMAD-METHOD
 - **Docs:** docs.bmad-method.org

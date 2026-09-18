@@ -50,7 +50,7 @@ class AgentState(TypedDict, total=False):
 - Không dùng state như "trash can" chứa mọi thứ
 - Thêm docstring cho từng field
 
-### 4. State更新 pattern
+### 4. Pattern cập nhật State
 
 ```python
 # Mỗi node chỉ return fields nó thay đổi

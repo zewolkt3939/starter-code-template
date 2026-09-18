@@ -81,7 +81,8 @@ uvicorn src.main:app --reload --port 8000
 ```
 
 Swagger UI ở <http://localhost:8000/docs>. Hoặc dùng `make run`, `make test`,
-`make lint` — xem `Makefile`.
+`make lint`, `make eval` (chạy agent qua golden dataset — không cần API key) — xem
+`Makefile`.
 
 ## Cấu trúc thư mục
 

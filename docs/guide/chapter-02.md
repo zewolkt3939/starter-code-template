@@ -102,6 +102,30 @@ Mỗi thư mục phục vụ một mục đích cụ thể. Hãy hiểu rõ trư
 
 > 🔑 **ĐIỂM CHÍNH:** Cấu trúc thư mục không phải ngẫu nhiên — nó phản ánh nguyên tắc separation of concerns (tách biệt trách nhiệm). Agent logic tách biệt khỏi API logic, tách biệt khỏi config, tách biệt khỏi tests. Khi dự án lớn lên, bạn sẽ thấy cấu trúc này giúp bạn tìm và sửa code nhanh hơn rất nhiều so với "bỏ tất cả vào một file."
 
+## Chọn tầng khởi đầu: Prototype nhanh hay build nghiêm túc?
+
+> 💡 **Bài học cohort:** đội có idea chưa validate mà dựng full Docker/CI ngay tuần 1 → 3 tuần đầu "set up hạ tầng" chứ không học được gì từ user. Ngược lại, đội đã chắc idea mà vẫn code prototype tay → demo ngày bị lỗi dưới tải nặng. Chọn đúng tầng.
+
+| | **Tầng 1 — Prototype ngày 1** (validate idea) | **Tầng 2 — Repo của đội** (chapter này) |
+|---|---|---|
+| Khi nào | Tuần 1-2, chưa chắc user cần gì; cần cái gì đó MÌNH THẤY được để hỏi 5 user thật | Đã có USP + ≥5 feedback khẳng định (xem Chương 5); bắt đầu build nghiêm túc trên repo đã cấp |
+| Công cụ | AI Studio / Gemini canvas + Firebase/Supabase free — KHÔNG server, KHÔNG Docker | Repo này: FastAPI + LangGraph + Docker + CI |
+| Mục tiêu | Trả lời "user có dùng không?" trong 48 giờ | Trả lời "sản phẩm chịu được Demo Day không?" trong 6 tuần |
+| Bỏ gì | DevOps, tests, guardrails (chấp nhận — vì sẽ vứt đi) | Không bỏ gì được nữa |
+
+**Quy tắc:** chuẩn bị "hoàn thành hơn hoàn hảo". Tầng 1 có thể vứt đi 100% — và đó là thắng, không phải lỗ. Khi chuyển lên tầng 2, mang theo đúng 2 thứ từ tầng 1: câu hỏi user thật (→ golden dataset Chương 10) + USP đã validate (Chương 5).
+
+```mermaid
+flowchart LR
+    A[Nhan repo tren Phoenix] --> B[Clone repo doi]
+    B --> C[Tao venv Python 3.12]
+    C --> D[Cap nhat requirements.txt]
+    D --> E[Config .env: API key + cascade model]
+    E --> F[Setup AI logging hooks]
+    F --> G[make run: server + Swagger UI]
+    G --> H[Branch develop + commit dau]
+```
+
 ## Thiết lập môi trường — Đừng để "trên máy tôi chạy được"
 
 Một câu nói kinh điển trong ngành phần mềm là "It works on my machine" — "Trên máy tôi chạy được." Nỗi ám ảnh này xuất phát từ việc môi trường phát triển không được setup đồng bộ: phiên bản Python khác, thư viện khác, biến môi trường khác. Phần này sẽ giúp bạn thiết lập môi trường đúng cách để không chỉ "trên máy bạn chạy được" mà "trên mọi máy đều chạy được."
@@ -110,7 +134,7 @@ Một câu nói kinh điển trong ngành phần mềm là "It works on my machi
 
 Trước khi bắt đầu, hãy xác nhận máy bạn đáp ứng các yêu cầu sau:
 
-- **Python 3.11 hoặc mới hơn.** Python 3.11 mang đến cải thiện tốc độ đáng kể (nhanh hơn 3.11 khoảng 10-25% so với 3.10) và hỗ trợ better error messages. Python 3.12+ cũng hoạt động tốt, nhưng một số thư viện có thể chưa tương thích hoàn toàn. Khuyến nghị: dùng Python 3.11.x.
+- **Python 3.12 hoặc mới hơn.** FastAPI, Pydantic 2, LangChain/LangGraph 1.x đều đã hỗ trợ đầy đủ 3.12/3.13. Khuyến nghị: dùng Python 3.12.x (ổn định, thư viện lõi đã verify 2026-09).
 
 - **pip phiên bản mới nhất.** Chạy `pip install --upgrade pip` để cập nhật.
 
@@ -122,10 +146,10 @@ Kiểm tra phiên bản Python:
 
 ```bash
 $ python3 --version
-# Output mong đợi: Python 3.11.x hoặc cao hơn
+# Output mong đợi: Python 3.12.x hoặc cao hơn
 
 # Nếu bạn có nhiều phiên bản Python, kiểm tra chính xác:
-$ python3.11 --version
+$ python3.12 --version
 ```
 
 ### Tạo virtual environment
@@ -134,7 +158,7 @@ Virtual environment (venv) là một môi trường Python cô lập, tách bi�
 
 ```bash
 # Từ thư mục gốc của dự án
-$ python3.11 -m venv .venv
+$ python3.12 -m venv .venv
 
 # Kích hoạt venv trên macOS/Linux
 $ source .venv/bin/activate
@@ -210,6 +234,8 @@ Biến môi trường (environment variables) là cách đúng để xử lý. B
 
 ### File .env.example
 
+> 💰 **Tài khoản AI miễn phí:** hướng dẫn đăng ký OpenAI/Anthropic/Gemini/Groq/Cohere... cho học viên AI20K ở [free-accounts.md](free-accounts.md).
+
 Template cung cấp sẵn file `.env.example` — đây là "mẫu" liệt kê tất cả biến môi trường cần thiết mà không chứa giá trị thực. Bước đầu tiên của bạn là copy nó thành `.env` và điền giá trị:
 
 ```bash
@@ -233,9 +259,15 @@ API_PREFIX=/api/v1
 # LLM Provider
 LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini
+# Cascade router (src/services/llm.py): model rẻ classify, model mạnh generate,
+# judge PHẢI khác generate (app raise ValueError nếu trùng — chống self-preference bias)
+MODEL_CLASSIFY=gpt-4o-mini
+MODEL_GENERATE=gpt-4o
+MODEL_JUDGE=gpt-4o-mini
 OPENAI_TEMPERATURE=0.7
 OPENAI_MAX_TOKENS=2048
+# Agent loop: số vòng ReAct tối đa trước khi escape hatch finalize-with-partial
+AGENT_MAX_ITERATIONS=8
 
 # Database (nếu cần)
 DATABASE_URL=sqlite:///./data/app.db
@@ -512,7 +544,7 @@ Agent tự động phân tích sentiment của bài đăng mạng xã hội và 
 
 ## Quick Start
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # Điền API key

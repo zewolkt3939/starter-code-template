@@ -646,7 +646,7 @@ Lựa chọn 3: SQLite cho development, PostgreSQL cho production.
 
 ## Lý do
 - Developer không cần cài PostgreSQL local, tiết kiệm thời gian setup.
-- SQLAlchemy ORM abstract database差异, code gần như giống nhau.
+- SQLAlchemy ORM trừu tượng hóa sự khác biệt database, code gần như giống nhau.
 - Chỉ cần thay đổi DATABASE_URL khi deploy.
 - SQLite đủ cho 1-2 developers, PostgreSQL cần khi có real users.
 
